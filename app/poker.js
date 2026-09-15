@@ -6,8 +6,6 @@ export const CALL = 1;
 export const RAISE = 2;
 export const ALL_IN = 3;
 export const ACTION_NAMES = ['FOLD', 'CALL', 'RAISE', 'ALL-IN'];
-export const RANKS = '23456789TJQKA';
-export const SUITS = 'cdhs';
 
 export function mulberry32(a) {
   let t = a >>> 0;
@@ -27,10 +25,6 @@ export function shuffle(arr, rng) {
     arr[j] = tmp;
   }
   return arr;
-}
-
-export function cardStr(c) {
-  return RANKS[c >> 2] + SUITS[c & 3];
 }
 
 export function raiseSize(pot) {
@@ -119,10 +113,6 @@ export function evalShowing(cards) {
   if (pairs.length >= 2) return pack(2, pairs[0], pairs[1], kick[0] || 0);
   if (pairs.length === 1) return pack(1, pairs[0], kick[0] || 0, kick[1] || 0, kick[2] || 0);
   return pack(0, kick[0] || 0, kick[1] || 0, kick[2] || 0, kick[3] || 0);
-}
-
-export function handCategory(score) {
-  return score >> 20;
 }
 
 function firstActor(state) {
@@ -332,7 +322,7 @@ export function applyAction(state, action) {
   if (state.stacks[state.toAct] === 0) nextStreetOrShow(state);
 }
 
-export function viewFrom(state, p) {
+export function viewFrom(state, p, oppFoldRate = 0) {
   const o = 1 - p;
   const toCall = Math.max(0, state.currentBet - state.contrib[p]);
   const oppActs = [];
@@ -356,13 +346,9 @@ export function viewFrom(state, p) {
     legal: legalActions(state, p),
     oppLastActions: oppActs.slice(-3),
     oppAggression: n ? agg / n : 0,
-    oppFoldRate: 0,
+    oppFoldRate,
     player: p,
   };
-}
-
-export function chipsDelta(state, p) {
-  return state.stacks[p] - START_STACK;
 }
 
 export function assertChipConservation(state) {

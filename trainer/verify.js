@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { mulberry32 } from '../app/poker.js';
 import { assertPnDisjoint } from '../app/encode.js';
 import { Brain, N_KC, N_MBON, dequantizeWeights, matchStats } from './brain-ref.js';
-import { makeTeacher } from './teacher.js';
+import { TEACHER_MC, teacherDecide } from './teacher.js';
 import { naturalEvalSet, playMatch, randomLegal } from './generate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -38,8 +38,14 @@ export function loadBrain(root = ROOT) {
   const i8 = new Int8Array(buf.buffer, buf.byteOffset, buf.byteLength);
   if (i8.length !== N_KC * N_MBON) throw new Error('weight length ' + i8.length);
   const w = dequantizeWeights(i8, meta.scales);
-  const brain = new Brain({ w, theta: meta.kc_threshold, seed: meta.projection_seed });
+  const brain = new Brain({
+    w,
+    theta: meta.kc_threshold,
+    thetaStreet: meta.kc_threshold_by_street,
+    seed: meta.projection_seed,
+  });
   brain.theta = meta.kc_threshold;
+  if (meta.kc_threshold_by_street) brain.thetaStreet = meta.kc_threshold_by_street;
   return { brain, meta };
 }
 
@@ -50,21 +56,20 @@ function pct(x) {
 export async function runVerify(opts = {}) {
   const quick = process.argv.includes('--quick') || opts.quick;
   const evalHands = Number(process.env.EVAL_HANDS || (quick ? 80 : 1200));
-  const matchHands = Number(process.env.MATCH_HANDS || (quick ? 60 : 800));
   const playHands = Number(process.env.PLAY_HANDS || (quick ? 80 : 1000));
-  const samples = Number(process.env.MC || (quick ? 40 : 140));
 
   assertPnDisjoint();
   const eqApp = equityImportedUnderApp();
   const { brain, meta } = loadBrain();
+  const samples = Number(process.env.MC || meta.training?.samples || TEACHER_MC);
 
   const items = naturalEvalSet(evalHands, mulberry32(4242), samples);
   const stats = matchStats(brain, items);
-  const teacher = makeTeacher(samples);
+  const teacher = (view) => teacherDecide(view, samples);
   const fly = (view) => brain.act(view);
   const randRng = mulberry32(51);
   const vsRandom = playMatch(playHands, mulberry32(53), fly, (v) => randomLegal(v, randRng));
-  const vsTeacher = playMatch(playHands, mulberry32(52), fly, teacher, { teacherFn: teacher });
+  const vsTeacher = playMatch(playHands, mulberry32(52), fly, teacher);
 
   const sat = brain.saturation();
   const trained = meta.training?.trainHands ?? meta.training?.seen ?? 0;
@@ -83,6 +88,7 @@ export async function runVerify(opts = {}) {
     handsTrained: trained,
     recTot: stats.recTot,
     nEval: items.length,
+    samples,
   };
 
   const block = [
@@ -111,7 +117,7 @@ export async function runVerify(opts = {}) {
     sat < 0.05 &&
     !eqApp;
 
-  return { gate, block, pass, stats, vsRandom, vsTeacher, meta, matchHands };
+  return { gate, block, pass, stats, vsRandom, vsTeacher, meta };
 }
 
 const isMain = process.argv[1] && path.normalize(process.argv[1]) === fileURLToPath(import.meta.url);

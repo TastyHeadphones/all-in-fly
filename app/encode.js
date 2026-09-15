@@ -11,6 +11,11 @@ export const PN_GROUPS = [
   { name: 'history', start: 632, count: 48 },
 ];
 
+const PN = Object.fromEntries(PN_GROUPS.map((g) => [g.name, g.start]));
+const HIST_ACTIONS = 0;
+const HIST_AGGRESSION = 24;
+const HIST_FOLDRATE = 36;
+
 export function assertPnDisjoint() {
   const used = new Uint8Array(N_PN);
   for (const g of PN_GROUPS) {
@@ -50,9 +55,9 @@ export function encode(view, out) {
   if (!out) out = new Float32Array(N_PN);
   out.fill(RATE_BG);
 
-  setCard(out, 0, view.myHole);
-  for (let i = 0; i < view.myUp.length; i++) setCard(out, 0, view.myUp[i]);
-  for (let i = 0; i < view.oppUp.length; i++) setCard(out, 208, view.oppUp[i]);
+  setCard(out, PN.my_cards, view.myHole);
+  for (let i = 0; i < view.myUp.length; i++) setCard(out, PN.my_cards, view.myUp[i]);
+  for (let i = 0; i < view.oppUp.length; i++) setCard(out, PN.opp_cards, view.oppUp[i]);
 
   const myRank = new Uint8Array(13);
   const oppRank = new Uint8Array(13);
@@ -70,13 +75,14 @@ export function encode(view, out) {
     oppRank[c >> 2]++;
     oppSuit[c & 3]++;
   }
-  let off = 416;
+  let off = PN.rank_presence;
   for (let r = 0; r < 13; r++) {
     thermo(out, off, 4, myRank[r]);
     off += 4;
     thermo(out, off, 4, oppRank[r]);
     off += 4;
   }
+  off = PN.suit_counts;
   for (let s = 0; s < 4; s++) {
     thermo(out, off, 4, mySuit[s]);
     off += 4;
@@ -84,7 +90,7 @@ export function encode(view, out) {
     off += 4;
   }
 
-  off = 552;
+  off = PN.betting;
   thermo(out, off, 16, view.street * 4);
   off += 16;
   thermo(out, off, 16, logBins(view.pot, 200));
@@ -95,21 +101,19 @@ export function encode(view, out) {
   off += 16;
   thermo(out, off, 16, logBins(view.oppStack, 100));
 
-  off = 632;
+  const hist = PN.history;
   const acts = view.oppLastActions;
   const nAct = acts.length;
   for (let slot = 0; slot < 3; slot++) {
     const src = slot - (3 - nAct);
     if (src >= 0) {
       const a = acts[src];
-      const base = off + slot * 8 + a * 2;
+      const base = hist + HIST_ACTIONS + slot * 8 + a * 2;
       out[base] = RATE_ON;
       out[base + 1] = RATE_ON;
     }
   }
-  off = 656;
-  thermo(out, off, 12, Math.round((view.oppAggression || 0) * 12));
-  off += 12;
-  thermo(out, off, 12, Math.round((view.oppFoldRate || 0) * 12));
+  thermo(out, hist + HIST_AGGRESSION, 12, Math.round((view.oppAggression || 0) * 12));
+  thermo(out, hist + HIST_FOLDRATE, 12, Math.round((view.oppFoldRate || 0) * 12));
   return out;
 }

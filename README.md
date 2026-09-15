@@ -18,20 +18,20 @@ Zero npm dependencies. Node built-ins only.
 ## Gate G1 (measured)
 
 ```
-action-match vs teacher, natural distribution: 79.1%
-per-action recall — FOLD 84.9%  CALL 82.1%  RAISE 69.6%  ALL-IN 76.8%
-action distribution — FOLD 12.1%  CALL 53.4%  RAISE 23.5%  ALL-IN 10.9%
-chips won per 100 hands vs random player: 527.60
-chips won per 100 hands vs equity teacher: -204.75
-folded the best hand at showdown, per 1000 hands: 11.00
+action-match vs teacher, natural distribution: 80.3%
+per-action recall — FOLD 85.0%  CALL 91.3%  RAISE 55.9%  ALL-IN 65.5%
+action distribution — FOLD 12.5%  CALL 62.5%  RAISE 16.5%  ALL-IN 8.4%
+chips won per 100 hands vs random player: 496.40
+chips won per 100 hands vs equity teacher: 77.45
+folded the best hand at showdown, per 1000 hands: 19.50
 called an all-in holding the worst possible hand, per 1000 hands: 0.00
 KC sparsity (mean % firing): 7.0%
-saturated synapses: 0.0%
+saturated synapses: 0.5%
 equity.js imported anywhere under app/: no
 hands trained: 10000
 ```
 
-Failed lines: action-match (need ≥80%), chips vs teacher (need ≥ −40), folded-best (need ≤5 per 1000). See `PROGRESS.md`.
+Failed line: folded-best (need ≤5 per 1000). Match, recall, distribution, chips, sparsity, and saturation pass. See `PROGRESS.md`.
 
 ## Licence
 

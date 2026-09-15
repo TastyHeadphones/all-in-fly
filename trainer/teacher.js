@@ -1,6 +1,8 @@
 import { ALL_IN, CALL, FOLD, RAISE, mulberry32 } from '../app/poker.js';
 import { equity } from './equity.js';
 
+export const TEACHER_MC = 160;
+
 function seedFromView(view) {
   let s = (view.myHole + 1) * 17;
   s = (s + view.pot * 31 + view.toCall * 13 + view.street * 101 + view.myStack * 7) >>> 0;
@@ -9,7 +11,7 @@ function seedFromView(view) {
   return s || 1;
 }
 
-export function teacherEquity(view, samples = 160) {
+export function teacherEquity(view, samples = TEACHER_MC) {
   const rng = mulberry32(seedFromView(view));
   return equity(view, rng, samples);
 }
@@ -49,13 +51,7 @@ export function teacherPolicy(view, eq) {
   return pickLegal(want, legal, eq);
 }
 
-export function teacherDecide(view, samples = 160) {
+export function teacherDecide(view, samples = TEACHER_MC) {
   const eq = teacherEquity(view, samples);
   return teacherPolicy(view, eq);
-}
-
-export function makeTeacher(samples = 160) {
-  return function teacher(view) {
-    return teacherDecide(view, samples);
-  };
 }

@@ -65,15 +65,12 @@ export function dequantizeWeights(i8, scales, out) {
 
 export class Brain {
   constructor(opts = {}) {
-    const proj = opts.edges && opts.syn
-      ? { edges: opts.edges, syn: opts.syn }
-      : (opts.edges && opts.edges.edges)
-        ? opts.edges
-        : buildProjection(opts.seed ?? PROJECTION_SEED);
+    const proj = buildProjection(opts.seed ?? PROJECTION_SEED);
     this.edges = proj.edges;
     this.syn = proj.syn;
     this.w = opts.w || new Float32Array(N_KC * N_MBON);
     this.theta = opts.theta ?? 890;
+    this.thetaStreet = opts.thetaStreet || null;
     this.wMax = opts.wMax ?? W_MAX;
     this.pn = new Float32Array(N_PN);
     this.kc = new Uint8Array(N_KC);
@@ -84,15 +81,17 @@ export class Brain {
     this.means = new Float32Array(N_COMPARTMENTS);
     this.lastLegal = [true, true, true, true];
     this.lastToCall = 0;
-    this.lastStreet = 1;
     this.tieRel = TIE_REL;
+    this.unitScale = new Float32Array(N_MBON);
+    const sr = mulberry32((opts.initSeed ?? 1) + 99991);
+    for (let u = 0; u < N_MBON; u++) this.unitScale[u] = 0.7 + sr() * 0.6;
     if (!opts.w) this.initWeights(opts.initSeed ?? 1);
   }
 
   initWeights(seed) {
     const rng = mulberry32(seed);
     const w = this.w;
-    for (let i = 0; i < w.length; i++) w[i] = 4 + (rng() - 0.5) * 0.04;
+    for (let i = 0; i < w.length; i++) w[i] = 4 + (rng() - 0.5) * 1.6;
   }
 
   encodeView(view) {
@@ -148,12 +147,12 @@ export class Brain {
   }
 
   forward(view) {
+    if (this.thetaStreet) this.theta = this.thetaStreet[view.street - 1] ?? this.thetaStreet[0];
     this.encodeView(view);
     const sp = this.computeKC(this.pn);
     this.computeMBON();
     this.lastLegal = view.legal;
     this.lastToCall = view.toCall;
-    this.lastStreet = view.street;
     return {
       kcFire: this.kc,
       nFired: this.nFired,
@@ -163,7 +162,7 @@ export class Brain {
     };
   }
 
-  decide(legal = this.lastLegal, toCall = this.lastToCall, street = this.lastStreet) {
+  decide(legal = this.lastLegal, toCall = this.lastToCall) {
     const means = this.means;
     const masked = [means[0], means[1], means[2], means[3]];
     for (let c = 0; c < 4; c++) if (!legal[c]) masked[c] = Infinity;
@@ -193,7 +192,7 @@ export class Brain {
 
   act(view) {
     this.forward(view);
-    return this.decide(view.legal, view.toCall, view.street);
+    return this.decide(view.legal, view.toCall);
   }
 
   learnOnError(wrongAction, correctAction, lr) {
@@ -202,18 +201,20 @@ export class Brain {
     const wMax = this.wMax;
     const fired = this.fired;
     const n = this.nFired;
+    const scale = this.unitScale;
     const cBase = correctAction * MBON_PER_COMP;
     const wBase = wrongAction * MBON_PER_COMP;
     for (let i = 0; i < n; i++) {
       const k = fired[i];
-      const step = lr * this.kcRate[k];
+      const rate = this.kcRate[k];
       const row = k * N_MBON;
       for (let u = 0; u < MBON_PER_COMP; u++) {
+        const base = lr * rate;
         const ci = row + cBase + u;
         const wi = row + wBase + u;
-        let v = w[ci] - step;
+        let v = w[ci] - base * scale[cBase + u];
         w[ci] = v < 0 ? 0 : v > wMax ? wMax : v;
-        v = w[wi] + step;
+        v = w[wi] + base * scale[wBase + u];
         w[wi] = v < 0 ? 0 : v > wMax ? wMax : v;
       }
     }
@@ -230,26 +231,21 @@ export class Brain {
     for (let i = 0; i < w.length; i++) if (w[i] <= 0 || w[i] >= wMax) n++;
     return n / w.length;
   }
-
-  exportState() {
-    return {
-      kcFire: this.kc.slice(),
-      nFired: this.nFired,
-      mbonDrive: this.mbon.slice(),
-      compartmentMean: this.means.slice(),
-      sparsity: this.sparsity(),
-    };
-  }
 }
 
-export function tuneThreshold(brain, views, target = 0.07) {
+function asView(item) {
+  return item.view || item;
+}
+
+function tuneOne(brain, views, target) {
+  if (!views.length) return brain.theta;
   let lo = 200, hi = 2800;
   for (let iter = 0; iter < 16; iter++) {
     const mid = (lo + hi) / 2;
     brain.theta = mid;
     let sp = 0;
     for (let i = 0; i < views.length; i++) {
-      brain.encodeView(views[i]);
+      brain.encodeView(asView(views[i]));
       sp += brain.computeKC(brain.pn);
     }
     sp /= views.length;
@@ -257,12 +253,31 @@ export function tuneThreshold(brain, views, target = 0.07) {
     else hi = mid;
   }
   brain.theta = (lo + hi) / 2;
+  return brain.theta;
+}
+
+export function tuneThreshold(brain, views, target = 0.07) {
+  const byStreet = [[], [], [], []];
+  for (let i = 0; i < views.length; i++) {
+    const v = asView(views[i]);
+    const s = v.street || 1;
+    byStreet[Math.max(1, Math.min(4, s)) - 1].push(v);
+  }
+  const thetas = [0, 0, 0, 0];
+  for (let s = 0; s < 4; s++) {
+    thetas[s] = tuneOne(brain, byStreet[s].length ? byStreet[s] : views, target);
+  }
+  brain.thetaStreet = thetas;
+  brain.theta = thetas[1];
   let sp = 0;
   for (let i = 0; i < views.length; i++) {
-    brain.encodeView(views[i]);
+    const v = asView(views[i]);
+    brain.theta = thetas[(v.street || 1) - 1];
+    brain.encodeView(v);
     sp += brain.computeKC(brain.pn);
   }
-  return { theta: brain.theta, sparsity: sp / views.length };
+  brain.theta = thetas[1];
+  return { theta: thetas[1], thetaStreet: thetas, sparsity: sp / views.length };
 }
 
 export function matchStats(brain, items) {
@@ -272,7 +287,7 @@ export function matchStats(brain, items) {
   let hit = 0;
   let sp = 0;
   for (let i = 0; i < items.length; i++) {
-    const view = items[i].view || items[i];
+    const view = asView(items[i]);
     const y = items[i].teacherAction;
     const a = brain.act(view);
     sp += brain.sparsity();
