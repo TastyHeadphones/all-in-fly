@@ -8,8 +8,8 @@ import {
 } from '../app/poker.js';
 import { assertPnDisjoint, N_PN } from '../app/encode.js';
 import { Brain, N_KC, N_MBON, PROJECTION_SEED, W_MAX, matchStats, quantizeWeights, tuneThreshold } from './brain-ref.js';
-import { collectTeacherSituations, isWorstPossible, naturalEvalSet, playHand, randomLegal } from './generate.js';
-import { TEACHER_MC } from './teacher.js';
+import { collectTeacherSituations, isWorstPossible, naturalEvalSet, playHand, playMatch, randomLegal } from './generate.js';
+import { TEACHER_MC, teacherDecide } from './teacher.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -47,6 +47,35 @@ function selfTestPoker() {
   assertPnDisjoint();
 }
 
+function errorStep(lr, a, y) {
+  return lr * [1.05, 0.95, 1.28, 1.15][y];
+}
+
+function oversampleRiver(items, copies) {
+  if (!copies) return items;
+  const out = items.slice();
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].view.street !== 4) continue;
+    for (let k = 0; k < copies; k++) out.push(items[i]);
+  }
+  return out;
+}
+
+function loadOrGenerate(trainHands, samples, rng) {
+  const dir = path.join(ROOT, '.cache');
+  const file = path.join(dir, `sit-${trainHands}-${samples}.json.gz`);
+  if (fs.existsSync(file)) {
+    console.log('loading cached situations', file);
+    return JSON.parse(zlib.gunzipSync(fs.readFileSync(file)).toString());
+  }
+  const t0 = Date.now();
+  const data = collectTeacherSituations(trainHands, rng, samples);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, zlib.gzipSync(Buffer.from(JSON.stringify(data))));
+  console.log('generate ms', Date.now() - t0, 'cached', file);
+  return data;
+}
+
 function saveArtifacts(brain, stats) {
   const dir = path.join(ROOT, 'weights');
   fs.mkdirSync(dir, { recursive: true });
@@ -54,13 +83,15 @@ function saveArtifacts(brain, stats) {
   const gz = zlib.gzipSync(Buffer.from(i8.buffer, i8.byteOffset, i8.byteLength), { level: 9 });
   fs.writeFileSync(path.join(dir, 'kc2mbon.i8.gz'), gz);
   const meta = {
-    version: 'm1-2',
+    version: 'm1-3',
     n_pn: N_PN,
     n_kc: N_KC,
     n_mbon: N_MBON,
     projection_seed: PROJECTION_SEED,
     kc_threshold: brain.theta,
     kc_threshold_by_street: brain.thetaStreet,
+    river_min_call: brain.riverMinCall,
+    river_big_call: brain.riverBigCall,
     w_max: W_MAX,
     scales: Array.from(scales),
     training: stats,
@@ -83,9 +114,8 @@ async function main() {
 
   const rng = mulberry32(12345);
   console.log('generating teacher self-play', trainHands, 'hands');
-  const t0 = Date.now();
-  const { items, dist, actions, hands } = collectTeacherSituations(trainHands, rng, samples);
-  console.log('generate ms', Date.now() - t0, 'actions', actions, 'hands', hands);
+  const { items, dist, actions, hands } = loadOrGenerate(trainHands, samples, rng);
+  console.log('actions', actions, 'hands', hands);
   console.log('teacher dist', dist.map((d) => (100 * d / actions).toFixed(1) + '%').join('  '),
     'counts', dist.join(','));
   for (let a = 0; a < 4; a++) console.log('  ', ACTION_NAMES[a], dist[a]);
@@ -94,16 +124,22 @@ async function main() {
   const holdout = naturalEvalSet(holdoutHands, mulberry32(99991), samples);
   console.log('holdout decisions', holdout.length);
 
-  const brain = new Brain({ seed: PROJECTION_SEED, initSeed: 7 });
+  const brain = new Brain({ seed: PROJECTION_SEED, initSeed: 7, riverMinCall: 0, riverBigCall: false });
   const tuneViews = holdout.length ? holdout : items.slice(0, 400);
-  const tuned = tuneThreshold(brain, tuneViews, 0.07);
+  const tuned = tuneThreshold(brain, tuneViews, [0.07, 0.07, 0.07, 0.09]);
   console.log('KC threshold', tuned.thetaStreet.map((t) => t.toFixed(1)).join('/'),
     'sparsity', (tuned.sparsity * 100).toFixed(2) + '%');
 
-  const natural = items;
+  const riverCopies = Number(process.env.RIVER_COPIES || 0);
+  const natural = oversampleRiver(items, riverCopies);
+  console.log('train items', natural.length, 'river copies', riverCopies);
   let errors = 0;
   let seen = 0;
   const rngTrain = mulberry32(777);
+  let bestW = null;
+  let bestScore = -Infinity;
+  let bestHol = null;
+  const teacher = (view) => teacherDecide(view, samples);
   for (let e = 0; e < epochs; e++) {
     const lr = lr0 * Math.pow(0.82, e);
     shuffle(natural, rngTrain);
@@ -115,12 +151,20 @@ async function main() {
       seen++;
       if (a === y) hit++;
       else {
-        brain.learnOnError(a, y, lr * [1.05, 0.95, 1.28, 1.15][y]);
+        brain.learnOnError(a, y, errorStep(lr, a, y));
         errors++;
       }
     }
     const hol = matchStats(brain, holdout);
+    const s4 = matchStats(brain, holdout.filter((it) => it.view.street === 4));
     const sat = brain.saturation();
+    const legal = hol.recall.every((r) => r >= 0.5) && hol.dist.every((d) => d <= 0.7);
+    const score = hol.match + (legal ? 0.05 : 0) - Math.max(0, s4.match < 0.75 ? 0.02 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      bestW = brain.w.slice();
+      bestHol = hol;
+    }
     console.log(
       'epoch', e + 1,
       'lr', lr.toFixed(5),
@@ -129,7 +173,56 @@ async function main() {
       'recall', hol.recall.map((r) => (r * 100).toFixed(0)).join('/'),
       'dist', hol.dist.map((d) => (d * 100).toFixed(0)).join('/'),
       'sat', (sat * 100).toFixed(2) + '%',
+      's4', (s4.match * 100).toFixed(1) + '%',
+      legal ? 'legal' : 'unbalanced',
     );
+  }
+  if (bestW) {
+    console.log('best holdout (not restored; G1 is fly-vs-teacher)', (bestHol.match * 100).toFixed(1) + '%',
+      'recall', bestHol.recall.map((r) => (r * 100).toFixed(0)).join('/'));
+  }
+
+  const daggerHands = quick ? 0 : Number(process.env.DAGGER_HANDS || 0);
+  const daggerRounds = Number(process.env.DAGGER_ROUNDS || 0);
+  for (let d = 0; d < daggerRounds && daggerHands > 0; d++) {
+    const bag = [];
+    const flyCollect = (view) => {
+      bag.push({ view, teacherAction: teacher(view) });
+      return brain.act(view);
+    };
+    playMatch(daggerHands, mulberry32(4000 + d), flyCollect, teacher);
+    const lr = Number(process.env.DAGGER_LR || 0.0012);
+    shuffle(bag, rngTrain);
+    let updates = 0, hit = 0;
+    for (let i = 0; i < bag.length; i++) {
+      const y = bag[i].teacherAction;
+      const a = brain.act(bag[i].view);
+      if (a === y) hit++;
+      else if (bag[i].view.street === 4) {
+        brain.learnOnError(a, y, errorStep(lr, a, y));
+        updates++;
+      }
+    }
+    const hol = matchStats(brain, holdout);
+    console.log(
+      'dagger', d + 1,
+      'states', bag.length,
+      's4-updates', updates,
+      'bag-match', ((hit / Math.max(1, bag.length)) * 100).toFixed(1) + '%',
+      'holdout', (hol.match * 100).toFixed(1) + '%',
+      'recall', hol.recall.map((r) => (r * 100).toFixed(0)).join('/'),
+      'dist', hol.dist.map((d) => (d * 100).toFixed(0)).join('/'),
+    );
+  }
+
+  brain.riverMinCall = 5;
+  brain.riverBigCall = false;
+
+  if (!quick) {
+    const probe = playMatch(400, mulberry32(52), (v) => brain.act(v), teacher);
+    console.log('probe folded-best/1000', probe.foldedBestPer1000.toFixed(2),
+      'chips vs teacher', probe.chipsPer100.toFixed(1),
+      'called-worst', probe.calledWorstPer1000.toFixed(2));
   }
 
   const saved = saveArtifacts(brain, {

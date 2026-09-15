@@ -43,6 +43,8 @@ export function loadBrain(root = ROOT) {
     theta: meta.kc_threshold,
     thetaStreet: meta.kc_threshold_by_street,
     seed: meta.projection_seed,
+    riverMinCall: meta.river_min_call ?? 5,
+    riverBigCall: !!meta.river_big_call,
   });
   brain.theta = meta.kc_threshold;
   if (meta.kc_threshold_by_street) brain.thetaStreet = meta.kc_threshold_by_street;

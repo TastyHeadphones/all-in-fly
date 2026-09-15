@@ -1,4 +1,4 @@
-import { CALL, FOLD, mulberry32 } from '../app/poker.js';
+import { ALL_IN, CALL, FOLD, mulberry32 } from '../app/poker.js';
 import { encode, N_PN } from '../app/encode.js';
 
 export const N_KC = 5177;
@@ -8,7 +8,7 @@ export const N_COMPARTMENTS = 4;
 export const MBON_PER_COMP = 24;
 export const PROJECTION_SEED = 20240601;
 export const W_MAX = 80;
-export const TIE_REL = 0.003;
+export const TIE_REL = 0.001;
 
 export function buildProjection(seed = PROJECTION_SEED) {
   const rng = mulberry32(seed);
@@ -81,6 +81,10 @@ export class Brain {
     this.means = new Float32Array(N_COMPARTMENTS);
     this.lastLegal = [true, true, true, true];
     this.lastToCall = 0;
+    this.lastStreet = 1;
+    this.riverMinCall = opts.riverMinCall ?? 5;
+    this.riverBigCall = !!opts.riverBigCall;
+    this.riverBigRel = opts.riverBigRel ?? 0.02;
     this.tieRel = TIE_REL;
     this.unitScale = new Float32Array(N_MBON);
     const sr = mulberry32((opts.initSeed ?? 1) + 99991);
@@ -153,6 +157,7 @@ export class Brain {
     this.computeMBON();
     this.lastLegal = view.legal;
     this.lastToCall = view.toCall;
+    this.lastStreet = view.street;
     return {
       kcFire: this.kc,
       nFired: this.nFired,
@@ -165,15 +170,20 @@ export class Brain {
   decide(legal = this.lastLegal, toCall = this.lastToCall) {
     const means = this.means;
     const masked = [means[0], means[1], means[2], means[3]];
+    if (legal[CALL] && !legal[ALL_IN]) masked[CALL] = Math.min(means[CALL], means[ALL_IN]);
     for (let c = 0; c < 4; c++) if (!legal[c]) masked[c] = Infinity;
-    let min = Infinity, second = Infinity, arg = -1;
+    let min = Infinity, second = Infinity, arg = -1, arg2 = -1;
     for (let c = 0; c < 4; c++) {
       const v = masked[c];
       if (v < min) {
+        arg2 = arg;
         second = min;
         min = v;
         arg = c;
-      } else if (v < second) second = v;
+      } else if (v < second) {
+        second = v;
+        arg2 = c;
+      }
     }
     if (arg < 0) {
       if (legal[CALL]) return CALL;
@@ -184,8 +194,15 @@ export class Brain {
     const scale = Math.max(Math.abs(min), 1);
     if (!Number.isFinite(second) || (second - min) / scale < this.tieRel) {
       if (toCall === 0 && legal[CALL]) return CALL;
-      if (legal[FOLD]) return FOLD;
-      if (legal[CALL]) return CALL;
+      if (legal[FOLD]) arg = FOLD;
+      else if (legal[CALL]) arg = CALL;
+    }
+    if (this.lastStreet === 4 && arg === FOLD && legal[CALL]) {
+      if (this.riverMinCall > 0 && toCall > 0 && toCall <= this.riverMinCall) return CALL;
+      if (this.riverBigCall && toCall > 50 && arg2 === CALL) {
+        const rel = (second - min) / scale;
+        if (rel < this.riverBigRel) return CALL;
+      }
     }
     return arg;
   }
@@ -193,6 +210,36 @@ export class Brain {
   act(view) {
     this.forward(view);
     return this.decide(view.legal, view.toCall);
+  }
+
+  snapshotTrace(action) {
+    const n = this.nFired;
+    const fired = new Uint16Array(n);
+    const rates = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      fired[i] = this.fired[i];
+      rates[i] = this.kcRate[this.fired[i]];
+    }
+    return { fired, rates, action, n };
+  }
+
+  applyTrace(trace, dopamine, lr) {
+    if (!trace || !trace.n || !dopamine || !lr) return;
+    const mag = Math.min(1, Math.abs(dopamine) / 80) * lr * (dopamine > 0 ? -1 : 1);
+    const w = this.w;
+    const wMax = this.wMax;
+    const scale = this.unitScale;
+    const base = trace.action * MBON_PER_COMP;
+    for (let i = 0; i < trace.n; i++) {
+      const k = trace.fired[i];
+      const rate = trace.rates[i];
+      const row = k * N_MBON;
+      for (let u = 0; u < MBON_PER_COMP; u++) {
+        const idx = row + base + u;
+        let v = w[idx] + mag * rate * scale[base + u];
+        w[idx] = v < 0 ? 0 : v > wMax ? wMax : v;
+      }
+    }
   }
 
   learnOnError(wrongAction, correctAction, lr) {
@@ -262,8 +309,9 @@ export function tuneThreshold(brain, items, target = 0.07) {
     byStreet[Math.max(1, Math.min(4, s)) - 1].push(v);
   }
   const thetas = [0, 0, 0, 0];
+  const targets = Array.isArray(target) ? target : [target, target, target, target];
   for (let s = 0; s < 4; s++) {
-    thetas[s] = tuneOne(brain, byStreet[s].length ? byStreet[s] : views, target);
+    thetas[s] = tuneOne(brain, byStreet[s].length ? byStreet[s] : views, targets[s] ?? targets[0]);
   }
   brain.thetaStreet = thetas;
   brain.theta = thetas[1];
