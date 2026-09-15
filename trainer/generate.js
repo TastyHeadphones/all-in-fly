@@ -134,17 +134,5 @@ export function playMatch(nHands, rng, choose0, choose1) {
 }
 
 export function naturalEvalSet(nHands, rng, samples = TEACHER_MC) {
-  const teacher = (view) => teacherDecide(view, samples);
-  const foldCount = [0, 0];
-  const handCount = [0, 0];
-  const foldRate = [0, 0];
-  const items = [];
-  for (let h = 0; h < nHands; h++) {
-    const { state, decisions } = playHand(rng, teacher, teacher, foldRate);
-    for (const d of decisions) {
-      items.push({ view: d.view, teacherAction: d.action });
-    }
-    noteFold(state, foldCount, handCount, foldRate);
-  }
-  return items;
+  return collectTeacherSituations(nHands, rng, samples).items;
 }

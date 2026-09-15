@@ -233,10 +233,6 @@ export class Brain {
   }
 }
 
-function asView(item) {
-  return item.view || item;
-}
-
 function tuneOne(brain, views, target) {
   if (!views.length) return brain.theta;
   let lo = 200, hi = 2800;
@@ -245,7 +241,7 @@ function tuneOne(brain, views, target) {
     brain.theta = mid;
     let sp = 0;
     for (let i = 0; i < views.length; i++) {
-      brain.encodeView(asView(views[i]));
+      brain.encodeView(views[i]);
       sp += brain.computeKC(brain.pn);
     }
     sp /= views.length;
@@ -256,10 +252,12 @@ function tuneOne(brain, views, target) {
   return brain.theta;
 }
 
-export function tuneThreshold(brain, views, target = 0.07) {
+export function tuneThreshold(brain, items, target = 0.07) {
   const byStreet = [[], [], [], []];
-  for (let i = 0; i < views.length; i++) {
-    const v = asView(views[i]);
+  const views = [];
+  for (let i = 0; i < items.length; i++) {
+    const v = items[i].view;
+    views.push(v);
     const s = v.street || 1;
     byStreet[Math.max(1, Math.min(4, s)) - 1].push(v);
   }
@@ -271,7 +269,7 @@ export function tuneThreshold(brain, views, target = 0.07) {
   brain.theta = thetas[1];
   let sp = 0;
   for (let i = 0; i < views.length; i++) {
-    const v = asView(views[i]);
+    const v = views[i];
     brain.theta = thetas[(v.street || 1) - 1];
     brain.encodeView(v);
     sp += brain.computeKC(brain.pn);
@@ -287,7 +285,7 @@ export function matchStats(brain, items) {
   let hit = 0;
   let sp = 0;
   for (let i = 0; i < items.length; i++) {
-    const view = asView(items[i]);
+    const view = items[i].view;
     const y = items[i].teacherAction;
     const a = brain.act(view);
     sp += brain.sparsity();
