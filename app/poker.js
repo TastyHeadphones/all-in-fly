@@ -1,5 +1,7 @@
 export const START_STACK = 100;
 export const ANTE = 1;
+export const MATCH_STACK = 500;
+export const MATCH_ANTE = 5;
 export const MAX_RAISES = 4;
 export const FOLD = 0;
 export const CALL = 1;
@@ -130,21 +132,28 @@ function firstActor(state) {
   return 0;
 }
 
-export function createHand(rng) {
+export function createHand(rng, opts = {}) {
   const deck = new Uint8Array(52);
   for (let i = 0; i < 52; i++) deck[i] = i;
   shuffle(deck, rng);
+  const buyin = opts.buyin ?? START_STACK;
+  const ante = opts.ante ?? ANTE;
+  const s0 = opts.stacks ? opts.stacks[0] : buyin;
+  const s1 = opts.stacks ? opts.stacks[1] : buyin;
+  const a0 = Math.min(ante, Math.max(0, s0));
+  const a1 = Math.min(ante, Math.max(0, s1));
   const state = {
     deck,
     deckPos: 4,
     hole: [deck[0], deck[1]],
     up: [[deck[2]], [deck[3]]],
-    stacks: [START_STACK - ANTE, START_STACK - ANTE],
-    pot: ANTE * 2,
+    stacks: [s0 - a0, s1 - a1],
+    pot: a0 + a1,
     street: 1,
     contrib: [0, 0],
     currentBet: 0,
     raisesThisStreet: 0,
+    lastRaiseInc: 0,
     folded: -1,
     toAct: 0,
     pending: 2,
@@ -152,8 +161,16 @@ export function createHand(rng) {
     done: false,
     winner: -1,
     winReason: '',
+    tableChips: s0 + s1,
+    ante,
+    maxRaises: opts.maxRaises ?? MAX_RAISES,
+    stackUnit: opts.stackUnit ?? buyin,
   };
   state.toAct = firstActor(state);
+  if (state.stacks[state.toAct] === 0 && state.stacks[1 - state.toAct] > 0) {
+    state.toAct = 1 - state.toAct;
+    state.pending = 1;
+  }
   return state;
 }
 
@@ -169,6 +186,7 @@ export function cloneState(s) {
     contrib: [s.contrib[0], s.contrib[1]],
     currentBet: s.currentBet,
     raisesThisStreet: s.raisesThisStreet,
+    lastRaiseInc: s.lastRaiseInc || 0,
     folded: s.folded,
     toAct: s.toAct,
     pending: s.pending,
@@ -176,6 +194,10 @@ export function cloneState(s) {
     done: s.done,
     winner: s.winner,
     winReason: s.winReason,
+    tableChips: s.tableChips,
+    ante: s.ante,
+    maxRaises: s.maxRaises,
+    stackUnit: s.stackUnit,
   };
 }
 
@@ -188,12 +210,24 @@ export function legalActions(state, p = state.toAct) {
   const oppStack = state.stacks[opp];
   legal[FOLD] = toCall > 0;
   legal[CALL] = true;
-  const inc = raiseSize(state.pot);
+  const inc = minRaiseInc(state);
   const raiseCost = toCall + inc;
   const oppCanCall = oppStack > 0;
-  legal[RAISE] = oppCanCall && stack > raiseCost && state.raisesThisStreet < MAX_RAISES;
+  const cap = state.maxRaises ?? MAX_RAISES;
+  legal[RAISE] = oppCanCall && stack > raiseCost && state.raisesThisStreet < cap;
   legal[ALL_IN] = oppCanCall && stack > toCall;
   return legal;
+}
+
+export function minRaiseInc(state) {
+  return Math.max(state.ante || ANTE, state.lastRaiseInc || 0, 1);
+}
+
+export function minPut(state, p = state.toAct) {
+  const toCall = Math.max(0, state.currentBet - state.contrib[p]);
+  const stack = state.stacks[p];
+  if (toCall === 0) return Math.min(minRaiseInc(state), stack);
+  return Math.min(toCall + minRaiseInc(state), stack);
 }
 
 function dealUp(state) {
@@ -267,6 +301,7 @@ function nextStreetOrShow(state) {
   state.contrib[1] = 0;
   state.currentBet = 0;
   state.raisesThisStreet = 0;
+  state.lastRaiseInc = 0;
   state.pending = 2;
   if (state.stacks[0] === 0 || state.stacks[1] === 0) {
     showdown(state);
@@ -275,7 +310,7 @@ function nextStreetOrShow(state) {
   state.toAct = firstActor(state);
 }
 
-export function applyAction(state, action) {
+export function applyAction(state, action, raiseInc) {
   if (state.done) throw new Error('action on finished hand');
   const p = state.toAct;
   const o = 1 - p;
@@ -296,20 +331,24 @@ export function applyAction(state, action) {
 
   let put = 0;
   if (action === CALL) put = Math.min(toCall, stack);
-  else if (action === RAISE) put = Math.min(toCall + raiseSize(state.pot), stack);
-  else put = stack;
+  else if (action === RAISE) {
+    const inc = raiseInc != null ? Math.max(1, raiseInc | 0) : raiseSize(state.pot);
+    put = Math.min(toCall + inc, stack);
+  } else put = stack;
 
   state.stacks[p] -= put;
   state.pot += put;
   state.contrib[p] += put;
   const raised = state.contrib[p] > state.currentBet;
   if (raised) {
+    const inc = state.contrib[p] - state.currentBet;
     state.currentBet = state.contrib[p];
     state.raisesThisStreet += 1;
+    state.lastRaiseInc = inc;
   }
   state.history.push({ p, action, street: state.street, put });
 
-  if (state.history.length > 48) throw new Error('runaway betting');
+  if (state.history.length > 80) throw new Error('runaway betting');
 
   if (raised) state.pending = state.stacks[o] > 0 ? 1 : 0;
   else state.pending -= 1;
@@ -334,26 +373,32 @@ export function viewFrom(state, p, oppFoldRate = 0) {
     if (h.action === RAISE || h.action === ALL_IN) agg += 1;
   }
   const n = oppActs.length;
+  const unit = state.stackUnit || START_STACK;
+  const k = START_STACK / unit;
   return {
     myHole: state.hole[p],
     myUp: state.up[p].slice(),
     oppUp: state.up[o].slice(),
-    myStack: state.stacks[p],
-    oppStack: state.stacks[o],
-    pot: state.pot,
-    toCall,
+    myStack: Math.round(state.stacks[p] * k),
+    oppStack: Math.round(state.stacks[o] * k),
+    pot: Math.round(state.pot * k),
+    toCall: Math.round(toCall * k),
     street: state.street,
     legal: legalActions(state, p),
     oppLastActions: oppActs.slice(-3),
     oppAggression: n ? agg / n : 0,
     oppFoldRate,
     player: p,
+    rawToCall: toCall,
+    rawStack: state.stacks[p],
+    rawPot: state.pot,
   };
 }
 
 export function assertChipConservation(state) {
   const total = state.stacks[0] + state.stacks[1] + state.pot;
-  if (total !== START_STACK * 2) {
+  const expect = state.tableChips != null ? state.tableChips : START_STACK * 2;
+  if (total !== expect) {
     throw new Error('chip conservation failed: ' + total);
   }
 }

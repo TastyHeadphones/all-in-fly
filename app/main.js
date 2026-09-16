@@ -1,6 +1,6 @@
 import {
-  ACTION_NAMES, ALL_IN, CALL, FOLD, RAISE, START_STACK,
-  applyAction, assertChipConservation, createHand, eval5, mulberry32,
+  ALL_IN, MATCH_ANTE, MATCH_STACK, RAISE,
+  applyAction, assertChipConservation, createHand, eval5, minPut, mulberry32,
   viewFrom,
 } from './poker.js';
 import { renderTable, renderActions, setHandMsg } from './view-table.js';
@@ -17,6 +17,8 @@ const FLY = 1;
 const worker = new Worker('app/worker.js', { type: 'module' });
 
 let state = null;
+let match = { stacks: [MATCH_STACK, MATCH_STACK], over: false };
+let handStart = [MATCH_STACK, MATCH_STACK];
 let busy = false;
 let stats = emptyStats();
 let foldRate = [0, 0];
@@ -24,6 +26,8 @@ let foldCount = [0, 0];
 let handCount = [0, 0];
 let pending = null;
 let lastFlyAgg = false;
+let betPut = 5;
+let gen = 0;
 
 const tableEl = document.getElementById('table');
 const barsEl = document.getElementById('bars');
@@ -52,8 +56,8 @@ worker.onmessage = (ev) => {
       if (rec && rec.stats) stats = Object.assign(emptyStats(), rec.stats);
       if (rec && rec.delta) post({ type: 'import-delta', delta: rec.delta });
       renderRead(readEl, stats, resetMemory);
-      newHand();
-    }).catch(() => newHand());
+      newGame();
+    }).catch(() => newGame());
     return;
   }
   if (msg.type === 'decision' && pending && msg.requestId === pending.id) {
@@ -81,9 +85,36 @@ function askFly(view) {
   });
 }
 
+function newGame() {
+  gen += 1;
+  pending = null;
+  busy = false;
+  match = { stacks: [MATCH_STACK, MATCH_STACK], over: false };
+  betPut = MATCH_ANTE;
+  statusEl.textContent = statusEl.textContent.replace(/ · game over.*/, '');
+  newHand();
+}
+
 function newHand() {
-  state = createHand(mulberry32((Date.now() ^ Math.random() * 1e9) >>> 0));
+  if (match.over) {
+    paint();
+    return;
+  }
+  if (match.stacks[VISITOR] <= 0 || match.stacks[FLY] <= 0) {
+    match.over = true;
+    paint();
+    return;
+  }
+  handStart = match.stacks.slice();
+  state = createHand(mulberry32((Date.now() ^ Math.random() * 1e9) >>> 0), {
+    stacks: handStart,
+    buyin: MATCH_STACK,
+    ante: MATCH_ANTE,
+    maxRaises: 99,
+    stackUnit: MATCH_STACK,
+  });
   lastFlyAgg = false;
+  betPut = minPut(state, VISITOR);
   setFlyState(flyEl, 'idle');
   setHandMsg('');
   paint();
@@ -91,27 +122,60 @@ function newHand() {
 }
 
 function paint() {
-  renderTable(tableEl, state);
+  const show = state || {
+    pot: 0, contrib: [0, 0], currentBet: 0, stacks: match.stacks,
+    up: [[], []], hole: [null, null], done: true, toAct: 0,
+  };
+  renderTable(tableEl, show, match);
   renderRead(readEl, stats, resetMemory);
+  const ng = document.getElementById('new-game');
+  if (ng) ng.addEventListener('click', newGame);
+  const ngTop = document.getElementById('new-game-top');
+  if (ngTop) ngTop.addEventListener('click', newGame);
+  if (match.over || !state) {
+    if (match.over) {
+      const youWin = match.stacks[VISITOR] > 0;
+      statusEl.textContent = (statusEl.textContent.split(' · game over')[0]) +
+        (youWin ? ' · game over — you win' : ' · game over — you lose');
+    }
+    return;
+  }
   const view = viewFrom(state, VISITOR, foldRate[FLY]);
   const acts = document.getElementById('actions');
   const ourTurn = !state.done && state.toAct === VISITOR && !busy;
-  renderActions(acts, view, onVisitor, !ourTurn, state.done);
+  renderActions(acts, view, onVisitor, !ourTurn, state.done, {
+    gameOver: match.over,
+    betPut,
+    minPut: minPut(state, VISITOR),
+    onBetPut: (n) => { betPut = n; },
+  });
 }
 
-function onVisitor(action) {
-  if (busy || state.done || state.toAct !== VISITOR) return;
+function onVisitor(action, put) {
+  if (busy || match.over || !state || state.done || state.toAct !== VISITOR) return;
   const view = viewFrom(state, VISITOR, foldRate[FLY]);
   if (!view.legal[action]) return;
   noteVisitorAction(stats, view.street, action, lastFlyAgg);
-  applyAction(state, action);
+  const toCall = view.rawToCall;
+  if (action === RAISE) {
+    const want = put != null ? put : betPut;
+    if (want >= view.rawStack && view.legal[ALL_IN]) applyAction(state, ALL_IN);
+    else applyAction(state, RAISE, Math.max(1, want - toCall));
+  } else {
+    applyAction(state, action);
+  }
   assertChipConservation(state);
   paint();
   continueHand();
 }
 
 async function continueHand() {
+  if (!state || match.over) return;
   if (state.done) {
+    finishHand();
+    return;
+  }
+  if (state.stacks[state.toAct] === 0) {
     finishHand();
     return;
   }
@@ -123,16 +187,22 @@ async function continueHand() {
       const view = viewFrom(state, VISITOR, foldRate[FLY]);
       const opts = [];
       for (let a = 0; a < 4; a++) if (view.legal[a]) opts.push(a);
-      onVisitor(opts[(Math.random() * opts.length) | 0]);
+      const a = opts[(Math.random() * opts.length) | 0];
+      const put = a === RAISE
+        ? Math.min(view.rawStack - 1, Math.max(minPut(state, VISITOR), view.rawToCall + MATCH_ANTE))
+        : view.rawStack;
+      onVisitor(a, put);
     }
     return;
   }
   busy = true;
+  const g = gen;
   setFlyState(flyEl, 'decide');
   paint();
   const view = viewFrom(state, FLY, foldRate[VISITOR]);
   const t0 = performance.now();
   const dec = await askFly(view);
+  if (g !== gen || !state || match.over) return;
   const wait = Math.max(0, 380 - (performance.now() - t0));
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   renderBars(barsEl, dec.means, dec.action, !reduced);
@@ -150,8 +220,9 @@ async function continueHand() {
 
 function finishHand() {
   busy = true;
-  const flyDelta = state.stacks[FLY] - START_STACK;
-  const visDelta = state.stacks[VISITOR] - START_STACK;
+  match.stacks = [state.stacks[VISITOR], state.stacks[FLY]];
+  const flyDelta = match.stacks[FLY] - handStart[FLY];
+  const visDelta = match.stacks[VISITOR] - handStart[VISITOR];
   if (state.winReason === 'fold') {
     foldCount[state.folded]++;
   }
@@ -172,9 +243,17 @@ function finishHand() {
       ? `Fly takes ${state.winReason === 'fold' ? 'the pot (you folded)' : 'the showdown'}. ${signed(flyDelta)} chips for the fly.`
       : `Split pot.`;
   setHandMsg(msg);
-  setFlyState(flyEl, flyDelta > 8 ? 'win' : (flyDelta < -8 ? 'lose' : 'idle'));
+  setFlyState(flyEl, flyDelta > 20 ? 'win' : (flyDelta < -20 ? 'lose' : 'idle'));
   persist();
   renderRead(readEl, stats, resetMemory);
+
+  if (match.stacks[VISITOR] <= 0 || match.stacks[FLY] <= 0) {
+    match.over = true;
+    busy = false;
+    paint();
+    return;
+  }
+
   if (simN && stats.hands >= simN) {
     statusEl.textContent = 'Simulated ' + stats.hands + ' hands. No stuck state.';
     busy = false;
