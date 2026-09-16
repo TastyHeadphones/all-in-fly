@@ -1,6 +1,6 @@
 import {
   ALL_IN, MATCH_ANTE, MATCH_STACK, RAISE,
-  applyAction, assertChipConservation, createHand, eval5, minPut, mulberry32,
+  advanceStreet, applyAction, assertChipConservation, createHand, eval5, minPut, mulberry32,
   viewFrom,
 } from './poker.js';
 import { renderTable, renderActions, setHandMsg } from './view-table.js';
@@ -112,6 +112,7 @@ function newHand() {
     ante: MATCH_ANTE,
     maxRaises: 99,
     stackUnit: MATCH_STACK,
+    pauseStreets: !simN,
   });
   lastFlyAgg = false;
   betPut = minPut(state, VISITOR);
@@ -148,13 +149,33 @@ function paint() {
     betPut,
     minPut: minPut(state, VISITOR),
     onBetPut: (n) => { betPut = n; },
+    streetPending: state.streetPending,
+    street: state.street,
   });
   const next = document.getElementById('next-round');
-  if (next) next.addEventListener('click', newHand);
+  if (next) next.addEventListener('click', nextRound);
+}
+
+function nextRound() {
+  if (match.over || !state) return;
+  if (state.streetPending) {
+    advanceStreet(state);
+    if (state.done) {
+      finishHand();
+      return;
+    }
+    betPut = minPut(state, VISITOR);
+    setHandMsg('');
+    busy = false;
+    paint();
+    continueHand();
+    return;
+  }
+  if (state.done) newHand();
 }
 
 function onVisitor(action, put) {
-  if (busy || match.over || !state || state.done || state.toAct !== VISITOR) return;
+  if (busy || match.over || !state || state.done || state.streetPending || state.toAct !== VISITOR) return;
   const view = viewFrom(state, VISITOR, foldRate[FLY]);
   if (!view.legal[action]) return;
   noteVisitorAction(stats, view.street, action, lastFlyAgg);
@@ -173,6 +194,13 @@ function onVisitor(action, put) {
 
 async function continueHand() {
   if (!state || match.over) return;
+  if (state.streetPending) {
+    busy = false;
+    paint();
+    setHandMsg('This round is over. Tap Next round for the next card.');
+    if (simN) nextRound();
+    return;
+  }
   if (state.done) {
     finishHand();
     return;

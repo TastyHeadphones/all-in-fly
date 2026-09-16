@@ -165,6 +165,8 @@ export function createHand(rng, opts = {}) {
     ante,
     maxRaises: opts.maxRaises ?? MAX_RAISES,
     stackUnit: opts.stackUnit ?? buyin,
+    pauseStreets: !!opts.pauseStreets,
+    streetPending: false,
   };
   state.toAct = firstActor(state);
   if (state.stacks[state.toAct] === 0 && state.stacks[1 - state.toAct] > 0) {
@@ -198,13 +200,15 @@ export function cloneState(s) {
     ante: s.ante,
     maxRaises: s.maxRaises,
     stackUnit: s.stackUnit,
+    pauseStreets: s.pauseStreets,
+    streetPending: s.streetPending,
   };
 }
 
 export function legalActions(state, p = state.toAct) {
   const legal = [false, false, false, false];
   const stack = state.stacks[p];
-  if (stack <= 0 || state.done) return legal;
+  if (stack <= 0 || state.done || state.streetPending) return legal;
   const toCall = Math.max(0, state.currentBet - state.contrib[p]);
   const opp = 1 - p;
   const oppStack = state.stacks[opp];
@@ -310,6 +314,19 @@ function nextStreetOrShow(state) {
   state.toAct = firstActor(state);
 }
 
+export function advanceStreet(state) {
+  if (!state.streetPending) return;
+  state.streetPending = false;
+  nextStreetOrShow(state);
+}
+
+function shouldPauseStreet(state) {
+  if (!state.pauseStreets) return false;
+  if (state.street >= 4) return false;
+  if (state.stacks[0] === 0 || state.stacks[1] === 0) return false;
+  return true;
+}
+
 export function applyAction(state, action, raiseInc) {
   if (state.done) throw new Error('action on finished hand');
   const p = state.toAct;
@@ -354,6 +371,11 @@ export function applyAction(state, action, raiseInc) {
   else state.pending -= 1;
 
   if (state.pending <= 0 || state.stacks[o] === 0) {
+    if (shouldPauseStreet(state)) {
+      settleUnmatched(state);
+      state.streetPending = true;
+      return;
+    }
     nextStreetOrShow(state);
     return;
   }

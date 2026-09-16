@@ -53,6 +53,10 @@ export function renderActions(el, view, onAct, disabled, done, opts = {}) {
     el.innerHTML = '';
     return;
   }
+  if (opts.streetPending) {
+    el.innerHTML = '<button type="button" class="act next-round" id="next-round">Next round — deal the next card</button>';
+    return;
+  }
   if (done) {
     el.innerHTML = '<button type="button" class="act next-round" id="next-round">Next round</button>';
     return;
