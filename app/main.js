@@ -149,6 +149,8 @@ function paint() {
     minPut: minPut(state, VISITOR),
     onBetPut: (n) => { betPut = n; },
   });
+  const next = document.getElementById('next-round');
+  if (next) next.addEventListener('click', newHand);
 }
 
 function onVisitor(action, put) {
@@ -260,8 +262,12 @@ function finishHand() {
     paint();
     return;
   }
-  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  setTimeout(newHand, simN ? 0 : (reduced ? 400 : 1400));
+  if (simN) {
+    setTimeout(newHand, 0);
+    return;
+  }
+  busy = false;
+  paint();
 }
 
 function signed(n) {

@@ -100,6 +100,12 @@ header h1 {
 }
 .act:disabled { opacity: 0.35; cursor: default; }
 .act:not(:disabled):hover { border-color: var(--amber); }
+.next-round {
+  width: 100%;
+  border-color: var(--amber);
+  color: var(--amber);
+  font-size: 1.05rem;
+}
 .wait { color: var(--muted); margin: 0.4rem 0; }
 .hand-msg { min-height: 1.4rem; margin-top: 0.5rem; color: var(--amber); font-size: 0.9rem; }
 

@@ -54,7 +54,7 @@ export function renderActions(el, view, onAct, disabled, done, opts = {}) {
     return;
   }
   if (done) {
-    el.innerHTML = '';
+    el.innerHTML = '<button type="button" class="act next-round" id="next-round">Next round</button>';
     return;
   }
   if (disabled || !view) {
